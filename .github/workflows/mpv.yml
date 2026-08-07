@@ -7,12 +7,15 @@ permissions:
   contents: write
 
 on: 
+  schedule:
+    # Weekly rebuild: 03:00 UTC on Sundays
+    - cron: '0 3 * * 0'
   workflow_dispatch:
     inputs:
       build_target:
         description: "Build target"
         required: false
-        default: "all-64bit"
+        default: "all-image-sort"
         type: choice
         options:
         - 32bit
@@ -20,6 +23,7 @@ on:
         - 64bit-v3
         - aarch64
         - all-64bit
+        - all-image-sort
         - all
       lgpl:
         description: "Also build lgpl libmpv"
@@ -46,7 +50,7 @@ on:
       release:
         description: "Publish a release"
         required: false
-        default: false
+        default: true
         type: boolean
       command:
         description: 'input command you want to run before build'
@@ -96,11 +100,14 @@ jobs:
               case "all-64bit":
                 matrix.bit = ["64","64-v3","aarch64"];
                 break;
+              case "all-image-sort":
+                matrix.bit = ["32","64","aarch64"];
+                break;
               case "all":
                 matrix.bit = ["32","64","64-v3","aarch64"];
                 break;
               default:
-                matrix.bit = ["64","64-v3","aarch64"];
+                matrix.bit = ["32","64","aarch64"];
                 break;
             }
             core.setOutput("matrix_bit",JSON.stringify(matrix));
