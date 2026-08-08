@@ -210,16 +210,31 @@ jobs:
         run: |
           echo "sha=${{ needs.params.outputs.sha }}" >> $GITHUB_ENV
           echo "short_time=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
-          echo "cache_suffix=$(date "+%Y-%m-%d")-${{ github.run_id }}-${{ github.run_attempt }}" >> $GITHUB_ENV
           sed -i '/ccache_conf.in/d'  mpv-winbuild-cmake/CMakeLists.txt
           sed -i '/ccache/d' mpv-winbuild-cmake/exec.in
-          # Pin the Rust nightly used for subrandr (cargo). The winbuild
-          # toolchain's lld is LLVM 22.1.8; nightlies >= 2026-08-06 ship
-          # LLVM 23.1.0 whose module flags lld 22.1.8 cannot parse
-          # ("ld.lld: error: Not an int attribute" at the mpv link step).
-          # nightly-2026-08-05 is the last LLVM 22.1.8 build. Revisit when
-          # the toolchain's clang/lld version is bumped upstream.
-          sed -i 's/--default-toolchain nightly /--default-toolchain nightly-2026-08-05 /' mpv-winbuild-cmake/toolchain/rustup.cmake
+
+          # Keep the toolchain LLVM in lockstep with the Rust nightly used
+          # for subrandr (cargo). subrandr objects are linked into libmpv
+          # with the toolchain's lld, which cannot parse objects produced
+          # by a NEWER LLVM major ("ld.lld: error: Not an int attribute").
+          # rustup is preinstalled on the runner image.
+          rustup toolchain install nightly --profile minimal 2>&1 | tail -n 1
+          rustc +nightly --version --verbose | tee nightly_version.txt
+          LLVM_MAJOR=$(awk '/LLVM version/ {split($3, v, "."); print v[1]}' nightly_version.txt)
+          NIGHTLY_DATE=$(awk '/commit-date/ {print $2}' nightly_version.txt)
+          echo "llvm_major=$LLVM_MAJOR" >> "$GITHUB_ENV"
+          echo "nightly_date=$NIGHTLY_DATE" >> "$GITHUB_ENV"
+          # Use the exact dated nightly so the query and the build can never
+          # straddle a nightly-publish boundary.
+          sed -i "s/--default-toolchain nightly /--default-toolchain nightly-$NIGHTLY_DATE /" mpv-winbuild-cmake/toolchain/rustup.cmake
+          # Point the toolchain's clang/lld/compiler-rt at the matching
+          # LLVM major (clang_version also fixes the lib/clang/<ver> prefix).
+          sed -i "s/set(clang_version \"[0-9]*\")/set(clang_version \"$LLVM_MAJOR\")/" mpv-winbuild-cmake/toolchain/llvm/llvm.cmake
+          sed -i "s|GIT_TAG release/[0-9]*\.x|GIT_TAG release/$LLVM_MAJOR.x|" mpv-winbuild-cmake/toolchain/llvm/llvm.cmake
+          # Version the caches by nightly+LLVM (markers first so the
+          # restore-key prefixes match across days) -- a major bump then
+          # invalidates stale toolchain/clang_root/rust caches automatically.
+          echo "cache_suffix=nightly${NIGHTLY_DATE}-llvm${LLVM_MAJOR}-$(date "+%Y-%m-%d")-${{ github.run_id }}-${{ github.run_attempt }}" >> $GITHUB_ENV
 
       - name: Lookup Toolchain Cache
         id: lookup_toolchain
@@ -228,7 +243,7 @@ jobs:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/build${{ matrix.bit }}
           key: toolchain-${{ inputs.compiler }}-build${{ matrix.bit }}-${{ env.cache_suffix }}
           restore-keys: |
-            toolchain-${{ inputs.compiler }}-build${{ matrix.bit }}-
+            toolchain-${{ inputs.compiler }}-build${{ matrix.bit }}-nightly${{ env.nightly_date }}-llvm${{ env.llvm_major }}-
           lookup-only: true
       - name: Lookup Build Cache
         id: lookup_build
@@ -237,7 +252,7 @@ jobs:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/build${{ matrix.bit }}
           key: ${{ inputs.compiler }}-build${{ matrix.bit }}-${{ env.cache_suffix }}
           restore-keys: |
-            ${{ inputs.compiler }}-build${{ matrix.bit }}-
+            ${{ inputs.compiler }}-build${{ matrix.bit }}-nightly${{ env.nightly_date }}-llvm${{ env.llvm_major }}-
           lookup-only: true
           
       - name: Generate cache key
@@ -281,7 +296,7 @@ jobs:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/clang_root
           key: ${{ matrix.bit }}-clang_root-${{ env.key_suffix }}
           restore-keys: |
-            ${{ matrix.bit }}-clang_root-${{ env.restore_suffix }}
+            ${{ matrix.bit }}-clang_root-nightly${{ env.nightly_date }}-llvm${{ env.llvm_major }}-${{ env.restore_suffix }}
 
       - name: Restore Rust Cache
         uses: actions/cache/restore@v6.1.0
@@ -290,7 +305,7 @@ jobs:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/install_rustup
           key: rust-${{ env.key_suffix }}
           restore-keys: |
-            rust-${{ env.restore_suffix }}
+            rust-nightly${{ env.nightly_date }}-llvm${{ env.llvm_major }}-${{ env.restore_suffix }}
       - name: Restore Source Cache
         uses: actions/cache/restore@v6.1.0
         with:
