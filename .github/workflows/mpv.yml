@@ -213,6 +213,13 @@ jobs:
           echo "cache_suffix=$(date "+%Y-%m-%d")-${{ github.run_id }}-${{ github.run_attempt }}" >> $GITHUB_ENV
           sed -i '/ccache_conf.in/d'  mpv-winbuild-cmake/CMakeLists.txt
           sed -i '/ccache/d' mpv-winbuild-cmake/exec.in
+          # Pin the Rust nightly used for subrandr (cargo). The winbuild
+          # toolchain's lld is LLVM 22.1.8; nightlies >= 2026-08-06 ship
+          # LLVM 23.1.0 whose module flags lld 22.1.8 cannot parse
+          # ("ld.lld: error: Not an int attribute" at the mpv link step).
+          # nightly-2026-08-05 is the last LLVM 22.1.8 build. Revisit when
+          # the toolchain's clang/lld version is bumped upstream.
+          sed -i 's/--default-toolchain nightly /--default-toolchain nightly-2026-08-05 /' mpv-winbuild-cmake/toolchain/rustup.cmake
 
       - name: Lookup Toolchain Cache
         id: lookup_toolchain
