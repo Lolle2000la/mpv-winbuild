@@ -1,10 +1,22 @@
 name: MPV
-run-name: "${{ inputs.run_name != '' && format('{0} ({1})', inputs.run_name, inputs.compiler) || inputs.prs != '' && format('{0}[{2}] ({1})', github.workflow, inputs.compiler, inputs.prs) || format('{0} ({1})', github.workflow, inputs.compiler) }}"
+run-name: "${{ inputs.run_name != '' && format('{0} ({1})', inputs.run_name, inputs.compiler || 'clang') || inputs.prs != '' && format('{0}[{2}] ({1})', github.workflow, inputs.compiler || 'clang', inputs.prs) || format('{0} ({1})', github.workflow, inputs.compiler || 'clang') }}"
 
 permissions:
   actions: write
   attestations: write
   contents: write
+
+# The `inputs` context is empty for `schedule` events, and workflow_dispatch
+# input defaults are NOT applied to scheduled runs. Derive the effective
+# settings once here: scheduled runs use the scheduled-build defaults,
+# while manual `workflow_dispatch` runs use the supplied inputs.
+env:
+  BUILD_TARGET: ${{ github.event_name == 'schedule' && 'all-image-sort' || inputs.build_target }}
+  COMPILER: ${{ github.event_name == 'schedule' && 'clang' || inputs.compiler }}
+  RELEASE: ${{ github.event_name == 'schedule' && 'true' || inputs.release }}
+  LGPL: ${{ github.event_name == 'schedule' && 'false' || inputs.lgpl }}
+  NEEDCLEAN: ${{ github.event_name == 'schedule' && 'false' || inputs.needclean }}
+  NO_SAVE_CACHE: ${{ github.event_name == 'schedule' && 'false' || inputs.no_save_cache }}
 
 on: 
   schedule:
@@ -83,7 +95,7 @@ jobs:
             core.setOutput('sha', String(commit.data.sha))
             
             let matrix = {};
-            let build_target = "${{ inputs.build_target }}"
+            let build_target = "${{ env.BUILD_TARGET }}"
             switch ( build_target ) {
               case "32bit":
                 matrix.bit = ["32"];
@@ -112,7 +124,7 @@ jobs:
             }
             core.setOutput("matrix_bit",JSON.stringify(matrix));
             matrix.lgpl=[false];
-            if ("${{ inputs.lgpl}}" == "true") {
+            if ("${{ env.LGPL }}" == "true") {
               matrix.lgpl.push(true)
             }
             core.setOutput("matrix",JSON.stringify(matrix));
@@ -217,11 +229,21 @@ jobs:
           # for subrandr (cargo). subrandr objects are linked into libmpv
           # with the toolchain's lld, which cannot parse objects produced
           # by a NEWER LLVM major ("ld.lld: error: Not an int attribute").
-          # rustup is preinstalled on the runner image.
-          rustup toolchain install nightly --profile minimal 2>&1 | tail -n 1
-          rustc +nightly --version --verbose | tee nightly_version.txt
+          # This step runs inside the archlinux container, not on the runner
+          # image, so rustup is NOT preinstalled. Install it into $HOME (kept
+          # out of the system PATH so it cannot shadow the build toolchain's
+          # own isolated rustup at install_rustup/).
+          export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+          sh rustup-init.sh -y --no-modify-path --profile minimal --default-toolchain nightly 2>&1 | tail -n 1
+          "$CARGO_HOME/bin/rustup" run nightly rustc --version --verbose | tee nightly_version.txt
           LLVM_MAJOR=$(awk '/LLVM version/ {split($3, v, "."); print v[1]}' nightly_version.txt)
           NIGHTLY_DATE=$(awk '/commit-date/ {print $2}' nightly_version.txt)
+          if [ -z "$LLVM_MAJOR" ] || [ -z "$NIGHTLY_DATE" ]; then
+            echo "::error::Could not determine the Rust nightly LLVM major / commit-date."
+            cat nightly_version.txt
+            exit 1
+          fi
           echo "llvm_major=$LLVM_MAJOR" >> "$GITHUB_ENV"
           echo "nightly_date=$NIGHTLY_DATE" >> "$GITHUB_ENV"
           # Use the exact dated nightly so the query and the build can never
@@ -241,18 +263,18 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/build${{ matrix.bit }}
-          key: toolchain-${{ inputs.compiler }}-build${{ matrix.bit }}-${{ env.cache_suffix }}
+          key: toolchain-${{ env.COMPILER }}-build${{ matrix.bit }}-${{ env.cache_suffix }}
           restore-keys: |
-            toolchain-${{ inputs.compiler }}-build${{ matrix.bit }}-nightly${{ env.nightly_date }}-llvm${{ env.llvm_major }}-
+            toolchain-${{ env.COMPILER }}-build${{ matrix.bit }}-nightly${{ env.nightly_date }}-llvm${{ env.llvm_major }}-
           lookup-only: true
       - name: Lookup Build Cache
         id: lookup_build
         uses: actions/cache/restore@v6.1.0
         with:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/build${{ matrix.bit }}
-          key: ${{ inputs.compiler }}-build${{ matrix.bit }}-${{ env.cache_suffix }}
+          key: ${{ env.COMPILER }}-build${{ matrix.bit }}-${{ env.cache_suffix }}
           restore-keys: |
-            ${{ inputs.compiler }}-build${{ matrix.bit }}-nightly${{ env.nightly_date }}-llvm${{ env.llvm_major }}-
+            ${{ env.COMPILER }}-build${{ matrix.bit }}-nightly${{ env.nightly_date }}-llvm${{ env.llvm_major }}-
           lookup-only: true
           
       - name: Generate cache key
@@ -262,7 +284,7 @@ jobs:
           script: |
             let toolchain_restore_key="${{ steps.lookup_toolchain.outputs.cache-matched-key }}";
             let build_restore_key="${{ steps.lookup_build.outputs.cache-matched-key }}";
-            let build_save_key="${{ inputs.compiler }}-build${{ matrix.bit }}-${{ env.cache_suffix }}";
+            let build_save_key="${{ env.COMPILER }}-build${{ matrix.bit }}-${{ env.cache_suffix }}";
             let key_suffix= "${{ env.cache_suffix }}"
             let restore_suffix= ""; // if only want to match primaryKey, set a value which make restore-keys can't hit
             
@@ -274,7 +296,7 @@ jobs:
               build_save_key += `(${toolchain_version})`;
               // If build cache version is not same as toolchain or needclean=true, don't restore build cache.
               // Else, don't restore toolchain cache and use build cache.
-              if ( !build_restore_key.includes(toolchain_version) || ${{ inputs.needclean }} ) {
+              if ( !build_restore_key.includes(toolchain_version) || ${{ env.NEEDCLEAN == 'true' }} ) {
                 build_restore_key="";
                 key_suffix=toolchain_version;  // only use same version cache as toolchain-version
                 restore_suffix="-only-use-primaryKey-";  // make restore-keys can't hit
@@ -290,7 +312,7 @@ jobs:
 
 
       - name: Restore clang sysroot cache
-        if: ${{ inputs.compiler =='clang' }}
+        if: ${{ env.COMPILER == 'clang' }}
         uses: actions/cache/restore@v6.1.0
         with: 
           path: ${{ github.workspace }}/mpv-winbuild-cmake/clang_root
@@ -320,7 +342,7 @@ jobs:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/build${{ matrix.bit }}
           key: ${{ env.toolchain_restore_key }}
       - name: Restore Build Cache
-        if: ${{ inputs.needclean != true && env.build_restore_key != '' }}
+        if: ${{ env.NEEDCLEAN != 'true' && env.build_restore_key != '' }}
         uses: actions/cache/restore@v6.1.0
         with:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/build${{ matrix.bit }}
@@ -331,9 +353,9 @@ jobs:
         with:
           update_packager_index: false
           install_ccache: false
-          restore_cache: ${{ inputs.needclean != true }}
-          store_cache: ${{ matrix.lgpl != true && inputs.no_save_cache != true }}
-          override_cache_key: ccache-build${{ matrix.bit }}-${{ inputs.compiler }}
+          restore_cache: ${{ env.NEEDCLEAN != 'true' }}
+          store_cache: ${{ matrix.lgpl != true && env.NO_SAVE_CACHE != 'true' }}
+          override_cache_key: ccache-build${{ matrix.bit }}-${{ env.COMPILER }}
           ccache_options: |
             cache_dir=${{ github.workspace }}/.ccache
             max_size=500M
@@ -375,7 +397,7 @@ jobs:
         run: |
           cd mpv-winbuild-cmake
           bit="${{ matrix.bit }}"
-          compiler="${{ inputs.compiler }}"
+          compiler="${{ env.COMPILER }}"
           gitdir=$(pwd)
           clang_root=$(pwd)/clang_root
           buildroot=$(pwd)
@@ -421,7 +443,7 @@ jobs:
           if [ "${{ matrix.lgpl }}" = "true" ]; then
             git am --3way ../compile-lgpl-libmpv.patch
           fi
-          bash ../build.sh -t '${{ matrix.bit }}' -c '${{ inputs.compiler }}' -s "${{ matrix.lgpl == true && 'true' || 'false' }}"
+          bash ../build.sh -t '${{ matrix.bit }}' -c '${{ env.COMPILER }}' -s "${{ matrix.lgpl == true && 'true' || 'false' }}"
       - name: Collect logs
         if: ${{ always() }}
         run: |
@@ -500,25 +522,25 @@ jobs:
           archive: false
 
       - name: Save clang sysroot cache
-        if: ${{ inputs.compiler =='clang' && inputs.no_save_cache != true && matrix.lgpl != true }}
+        if: ${{ env.COMPILER == 'clang' && env.NO_SAVE_CACHE != 'true' && matrix.lgpl != true }}
         uses: actions/cache/save@v6.1.0
         with: 
           path: ${{ github.workspace }}/mpv-winbuild-cmake/clang_root
           key: ${{ matrix.bit }}-clang_root-${{ env.cache_suffix }}
       - name: Save Sources Cache
-        if: ${{ inputs.no_save_cache != true && matrix.lgpl != true }}
+        if: ${{ env.NO_SAVE_CACHE != 'true' && matrix.lgpl != true }}
         uses: actions/cache/save@v6.1.0
         with:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/src_packages
           key: source-${{ env.cache_suffix }}
       - name: Save Rust Cache
-        if: ${{ inputs.no_save_cache != true && matrix.lgpl != true }}
+        if: ${{ env.NO_SAVE_CACHE != 'true' && matrix.lgpl != true }}
         uses: actions/cache/save@v6.1.0
         with:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/install_rustup
           key: rust-${{ env.cache_suffix }}
       - name: Save Build Cache
-        if: ${{ inputs.no_save_cache != true && matrix.lgpl != true }}
+        if: ${{ env.NO_SAVE_CACHE != 'true' && matrix.lgpl != true }}
         uses: actions/cache/save@v6.1.0
         with:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/build${{ matrix.bit }}
@@ -629,7 +651,7 @@ jobs:
   publish_release:
     name: Publish release
     needs: [build_mpv,params]
-    if: ${{ inputs.release == true }}
+    if: ${{ github.event_name == 'schedule' || inputs.release == true }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -691,7 +713,7 @@ jobs:
             const sha = `${{ needs.params.outputs.sha }}`;
             let note = `**MPV Git commit**: https://github.com/mpv-player/mpv/commit/${sha}\n`;
             note+="**Build Time**: ${{ env.long_time }}\n";
-            note+="**Compiler**: ${{ inputs.compiler }}\n";
+            note+="**Compiler**: ${{ env.COMPILER }}\n";
             note+="**Build Details**: https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}\n";
             const patch_note = `${{ needs.params.outputs.patch_note }}` ;
             if (patch_note) {
@@ -785,8 +807,8 @@ jobs:
         uses: ./action/resave_cache
         with:
           path: ${{ github.workspace }}/mpv-winbuild-cmake/build${{ matrix.bit }}
-          key: toolchain-${{ inputs.compiler }}-build${{ matrix.bit }}-
-          restore-keys: toolchain-${{ inputs.compiler }}-build${{ matrix.bit }}-
+          key: toolchain-${{ env.COMPILER }}-build${{ matrix.bit }}-
+          restore-keys: toolchain-${{ env.COMPILER }}-build${{ matrix.bit }}-
 
       - name: Generate cache key
         id: generate_key
@@ -802,7 +824,7 @@ jobs:
 
       - name: Resave inital clang sysroot cache
         id: clang_root
-        if: ${{ inputs.compiler =='clang' && env.toolchain_version  }}
+        if: ${{ env.COMPILER == 'clang' && env.toolchain_version  }}
         uses: ./action/resave_cache
         with: 
           path: ${{ github.workspace }}/mpv-winbuild-cmake/clang_root
@@ -812,7 +834,7 @@ jobs:
   cache_llvm:
     name: keep llvm cache alive
     needs: [params,build_mpv]
-    if: ${{ inputs.no_save_cache != true && inputs.compiler =='clang' }}
+    if: ${{ github.event_name == 'schedule' || (inputs.no_save_cache != true && inputs.compiler == 'clang') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/archlinux/archlinux:base-devel
