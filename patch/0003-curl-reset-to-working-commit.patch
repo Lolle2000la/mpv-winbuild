@@ -1,0 +1,37 @@
+From 71d3be78449032a36f9e7dddcb4e54f33db4f96f Mon Sep 17 00:00:00 2001
+From: Lolle2000la <lolle2000.la@gmail.com>
+Date: Sun, 11 Oct 2026 20:31:50 +0200
+Subject: [PATCH] curl: reset to working commit
+
+Pin curl to 318bd978ea2d36ace36b42da2174b79c3abd89a3, the last commit
+before 978cce12adb7 ("openssl: fix OpenSSL v4.1 no-deprecated build")
+switched to ASN1_STRING_get_length(). That function was added to OpenSSL
+in 5b05b7da7c81 ("Rename ASN1_STRING_length_ex() to ASN1_STRING_get_length()",
+2026-07-20), but the toolchain's OpenSSL is pinned to d8bf6cdd4849925c30e4f1911c7acb49cb34b702
+(2026-07-12, before the rename) to avoid the Twitch TLS regression from
+openssl/openssl#31194. curl's fallback for ASN1_STRING_get_length is guarded
+by '#if OPENSSL_VERSION_NUMBER < 0x40100000L', which the 4.1.0-dev pin does
+not satisfy, so a cold build fails with 'call to undeclared function
+ASN1_STRING_get_length'. Bumping OpenSSL is not an option because the
+function only exists after the TLS-breaking PR.
+---
+ packages/curl.cmake | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/packages/curl.cmake b/packages/curl.cmake
+index 9e2130b..49c869a 100644
+--- a/packages/curl.cmake
++++ b/packages/curl.cmake
+@@ -14,6 +14,9 @@ ExternalProject_Add(curl
+     SOURCE_DIR ${SOURCE_LOCATION}
+     GIT_CLONE_FLAGS "--filter=tree:0"
+     GIT_CLONE_POST_COMMAND "sparse-checkout set --no-cone /* !tests !docs"
++    GIT_REMOTE_NAME origin
++    GIT_TAG master
++    GIT_RESET 318bd978ea2d36ace36b42da2174b79c3abd89a3
+     PATCH_COMMAND ${EXEC} git am --3way ${CMAKE_CURRENT_SOURCE_DIR}/curl-*.patch
+     UPDATE_COMMAND ""
+     CONFIGURE_COMMAND ${EXEC} ${CMAKE_COMMAND} -H<SOURCE_DIR> -B<BINARY_DIR>
+-- 
+2.56.0
+
